@@ -12,8 +12,10 @@ anyio==4.15.1
 attrs==26.1.0
 beautifulsoup4==4.15.0
 certifi==2026.7.22
+cffi==2.1.1
 charset-normalizer==3.5.2
 click==8.5.0
+cryptography==50.0.2
 deno==2.9.7
 dishka==1.10.1
 dnspython==2.8.0
@@ -43,6 +45,7 @@ papilio-tasks[scheduler-redis] @ https://codeload.github.com/stupidprogrammer4/p
 playwright==1.63.0
 pluggy==1.6.0
 propcache==0.5.4
+pycparser==3.0
 pycron==3.3.0
 pydantic==2.12.5
 pydantic-core==2.41.5
