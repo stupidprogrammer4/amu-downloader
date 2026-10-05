@@ -1,0 +1,10 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Exact synthetic token retained in historical test fixtures"
+regexTarget = "secret"
+regexes = ['''^ZXh0ZXJuYWwtdGVzdC10b2tlbg==$''']

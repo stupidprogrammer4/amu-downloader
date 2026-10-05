@@ -1,0 +1,151 @@
+name: amu-downloader
+x-api: &api
+  build:
+    context: .
+    dockerfile: api/Dockerfile
+  image: ${DOWNLOADER_API_IMAGE:-downloader-api:local}
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  environment:
+    DOWNLOADER_DATABASE_URL: ${DOWNLOADER_DATABASE_URL:?Set DOWNLOADER_DATABASE_URL}
+    DOWNLOADER_REDIS_URL: ${DOWNLOADER_REDIS_URL:-redis://redis:6379/0}
+    DOWNLOADER_SERVICE_KEY: ${DOWNLOADER_SERVICE_KEY:?Set DOWNLOADER_SERVICE_KEY}
+    DOWNLOADER_ADMIN_USER_IDS: ${DOWNLOADER_ADMIN_USER_IDS:?Set DOWNLOADER_ADMIN_USER_IDS}
+    DOWNLOADER_DRY_RUN: ${DOWNLOADER_DRY_RUN:-true}
+    PAPILIO_CONFIG: config.yml
+  volumes:
+    - ./config.yml:/app/config.yml:ro
+  networks: [application, database]
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 90s
+services:
+  mysql:
+    image: mysql:8.4.10
+    environment:
+      MYSQL_DATABASE: downloader
+      MYSQL_USER: downloader
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    networks: [database]
+    volumes: ["mysql-data:/var/lib/mysql"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysql --protocol=socket -uroot -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+  redis:
+    image: redis:8.2.1-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    networks: [database]
+    volumes: ["redis-data:/data"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  migrate:
+    <<: *api
+    command: ["sh", "-c", "alembic -c api/alembic.ini upgrade head && python -m src.cli.seed"]
+    restart: 'no'
+  api:
+    <<: *api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports: ["127.0.0.1:18020:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  worker:
+    <<: *api
+    command: ["taskiq", "worker", "src.apps.media:broker", "--workers", "1", "--max-async-tasks", "4"]
+    mem_limit: 640m
+    cpus: 0.75
+    pids_limit: 160
+    environment:
+      DOWNLOADER_DATABASE_URL: ${DOWNLOADER_DATABASE_URL:?Set DOWNLOADER_DATABASE_URL}
+      DOWNLOADER_REDIS_URL: ${DOWNLOADER_REDIS_URL:-redis://redis:6379/0}
+      DOWNLOADER_SERVICE_KEY: ${DOWNLOADER_SERVICE_KEY:?Set DOWNLOADER_SERVICE_KEY}
+      DOWNLOADER_ADMIN_USER_IDS: ${DOWNLOADER_ADMIN_USER_IDS:?Set DOWNLOADER_ADMIN_USER_IDS}
+      DOWNLOADER_SPOTIFY_CLIENT_ID: ${DOWNLOADER_SPOTIFY_CLIENT_ID:-}
+      DOWNLOADER_SPOTIFY_CLIENT_SECRET: ${DOWNLOADER_SPOTIFY_CLIENT_SECRET:-}
+      DOWNLOADER_SPOTIFY_ACCESS_TOKEN: ${DOWNLOADER_SPOTIFY_ACCESS_TOKEN:-}
+      DOWNLOADER_YOUTUBE_PROXY_URL: ${DOWNLOADER_YOUTUBE_PROXY_URL:-}
+      DOWNLOADER_YOUTUBE_TOKEN_PROVIDER_URL: ${DOWNLOADER_YOUTUBE_TOKEN_PROVIDER_URL:-}
+      PAPILIO_CONFIG: config.yml
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - media-data:/app/data/media
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+  scheduler:
+    <<: *api
+    networks: [database]
+    mem_limit: 160m
+    command: ["taskiq", "scheduler", "src.apps.media:scheduler", "--update-interval", "5"]
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - media-data:/app/data/media
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+  bots:
+    image: ${DOWNLOADER_BOTS_IMAGE:-downloader-bots:local}
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    build:
+      context: .
+      dockerfile: bots/Dockerfile
+    environment:
+      DOWNLOADER_BOT_TOKEN: ${DOWNLOADER_BOT_TOKEN:-}
+      DOWNLOADER_WEBHOOK_SECRET: ${DOWNLOADER_WEBHOOK_SECRET:-}
+      DOWNLOADER_SERVICE_KEY: ${DOWNLOADER_SERVICE_KEY:?Set DOWNLOADER_SERVICE_KEY}
+      DOWNLOADER_ADMIN_USER_IDS: ${DOWNLOADER_ADMIN_USER_IDS:?Set DOWNLOADER_ADMIN_USER_IDS}
+      DOWNLOADER_API_URL: http://api:8000
+      DOWNLOADER_REDIS_URL: ${DOWNLOADER_REDIS_URL:-redis://redis:6379/0}
+      DOWNLOADER_WEBHOOK_BASE_URL: ${DOWNLOADER_WEBHOOK_BASE_URL:-https://bot.amupouya.org}
+    networks: [application, database]
+    volumes:
+      - media-data:/app/data/media:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports: ["127.0.0.1:18021:8080"]
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/live', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+volumes:
+  mysql-data:
+  redis-data:
+  media-data:
+networks:
+  application:
+  database:
+    internal: true
